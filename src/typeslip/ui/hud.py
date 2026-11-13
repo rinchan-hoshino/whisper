@@ -150,6 +150,8 @@ class Hud(QWidget):
             color = QColor(245, 245, 245, int(255 * alpha * alpha_scale))
             if message.own:
                 color = QColor(180, 230, 255, int(255 * alpha * alpha_scale))
+            # 深色半透明底：游戏和聊天背景可能是白的，文字要看得清。
+            painter.fillRect(QRect(8, y, self.width() - 16, line), QColor(16, 16, 20, int(150 * alpha * alpha_scale)))
             painter.setPen(color)
             painter.drawText(QRect(12, y, self.width() - 24, line), Qt.AlignmentFlag.AlignVCenter,
                              f"{message.nickname}：{message.text}")
@@ -158,6 +160,7 @@ class Hud(QWidget):
         painter.setBrush(dot)
         painter.drawEllipse(QPoint(self.width() - 12, 12), 4, 4)
         if self.status_text and not self.connected:
+            painter.fillRect(QRect(8, 4, self.width() - 16, line), QColor(16, 16, 20, 150))
             painter.setPen(QColor(255, 220, 160))
             painter.drawText(QRect(12, 4, self.width() - 40, line), Qt.AlignmentFlag.AlignVCenter, self.status_text)
         painter.end()
