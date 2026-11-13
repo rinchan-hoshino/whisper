@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import base64
+import ctypes
 import json
 import os
 import time
+from ctypes import wintypes
 from dataclasses import dataclass
 
 
@@ -56,10 +58,52 @@ def parse_login_value(value: str, *, now: float | None = None) -> LoginSession:
     )
 
 
+class _ProcessEntry(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", wintypes.DWORD),
+        ("cntUsage", wintypes.DWORD),
+        ("th32ProcessID", wintypes.DWORD),
+        ("th32DefaultHeapID", ctypes.c_size_t),
+        ("th32ModuleID", wintypes.DWORD),
+        ("cntThreads", wintypes.DWORD),
+        ("th32ParentProcessID", wintypes.DWORD),
+        ("pcPriClassBase", wintypes.LONG),
+        ("dwFlags", wintypes.DWORD),
+        ("szExeFile", wintypes.WCHAR * 260),
+    ]
+
+
+def oopz_running() -> bool:
+    """Windows 进程快照里有没有 Oopz.exe。注册表里的登录值可能是上次留下的，要看进程。"""
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    kernel.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    for name in ("Process32FirstW", "Process32NextW"):
+        getattr(kernel, name).argtypes = [wintypes.HANDLE, ctypes.POINTER(_ProcessEntry)]
+        getattr(kernel, name).restype = wintypes.BOOL
+    snapshot = kernel.CreateToolhelp32Snapshot(0x2, 0)  # TH32CS_SNAPPROCESS
+    if snapshot == ctypes.c_void_p(-1).value:
+        raise SessionError("无法检查 Oopz 是否运行，请稍后重试。")
+    try:
+        entry = _ProcessEntry()
+        entry.dwSize = ctypes.sizeof(entry)
+        found = kernel.Process32FirstW(snapshot, ctypes.byref(entry))
+        while found:
+            if entry.szExeFile.casefold() == "oopz.exe":
+                return True
+            found = kernel.Process32NextW(snapshot, ctypes.byref(entry))
+        return False
+    finally:
+        kernel.CloseHandle(snapshot)
+
+
 def read_login_value() -> str:
     """只在 Windows 上读注册表；Oopz 没开或没登录抛 SessionError。"""
     if os.name != "nt":
         raise SessionError("只能在 Windows 上读取 Oopz 登录态。")
+    if not oopz_running():
+        raise SessionError("先打开 Oopz 并登录。")
     import winreg
 
     try:
