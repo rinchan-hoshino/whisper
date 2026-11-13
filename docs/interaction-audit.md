@@ -1,7 +1,7 @@
 # 1.0.2 交互审计附录
 
 基线：0.12.0 发布源码 `55f7cd08c0ba744535fed96a28bb95e7bc493498`（`pyproject.toml` / `__version__`），对照 1.0.1 `0e72f4be9`，修复分支 `fix/1.0.2`。
-旧版依据：`main.py`、`widgets.py`、`message_widgets.py`、`intent.py`、`settings_dialog.py`、`win32_input.py` 及对应交互测试；可用 `git show 55f7cd0:src/oopz_overlay/<文件>` 复查。新版有意变更以 README、`docs/releasing.md` 的 1.0/1.0.1 记录为依据。
+旧版依据：`main.py`、`widgets.py`、`message_widgets.py`、`intent.py`、`settings_dialog.py`、`win32_input.py` 及对应交互测试；可用 `git show 55f7cd0:src/oopz_overlay/<文件>（当前树里在 legacy/oopz_overlay/）` 复查。新版有意变更以 README、`docs/releasing.md` 的 1.0/1.0.1 记录为依据。
 
 | 行为 | 0.12.0 实际行为 | 1.0.1 对比及 1.0.2 结论 / 验证 |
 | --- | --- | --- |
