@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from typeslip.adapters.session import SessionError, parse_login_value
+from typeslip.adapters.updater import remove_applied_updates
 from typeslip.core.hotkeys import HotkeyError, MOD_CONTROL, MOD_SHIFT, parse_hotkey
 from typeslip.core.reconnect import backoff_seconds
 from typeslip.core.settings import Settings, migrate_legacy
@@ -149,6 +150,24 @@ def test_legacy_migration_pins_channel_and_keeps_hotkeys_and_font():
 
 def test_legacy_without_channel_follows_voice():
     assert migrate_legacy({}).channel_mode == "follow"
+
+
+def test_system_notice_line_has_no_nickname_prefix():
+    assert ChatMessage("u", "", "已更新到 2.0.0").line == "已更新到 2.0.0"
+    assert ChatMessage("m", "小阿比", "你好").line == "小阿比：你好"
+
+
+def test_remove_applied_updates_only_touches_update_exes(tmp_path: Path):
+    (tmp_path / "update-2.0.0.exe").write_bytes(b"a")
+    (tmp_path / "update-2.0.1.exe").write_bytes(b"b")
+    (tmp_path / "keep.txt").write_text("x", encoding="utf-8")
+    removed = remove_applied_updates(tmp_path)
+    assert {p.name for p in removed} == {"update-2.0.0.exe", "update-2.0.1.exe"}
+    assert [p.name for p in tmp_path.iterdir()] == ["keep.txt"]
+
+
+def test_remove_applied_updates_handles_missing_dir(tmp_path: Path):
+    assert remove_applied_updates(tmp_path / "nope") == []
 
 
 # ---- 登录值 ----

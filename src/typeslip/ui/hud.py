@@ -154,7 +154,7 @@ class Hud(QWidget):
             painter.fillRect(QRect(8, y, self.width() - 16, line), QColor(16, 16, 20, int(150 * alpha * alpha_scale)))
             painter.setPen(color)
             painter.drawText(QRect(12, y, self.width() - 24, line), Qt.AlignmentFlag.AlignVCenter,
-                             f"{message.nickname}：{message.text}")
+                             message.line)
         dot = QColor(90, 220, 120) if self.connected else QColor(230, 90, 90)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(dot)

@@ -273,7 +273,8 @@ class App(QObject):
             version = ""
         record.unlink(missing_ok=True)
         if version == __version__:
-            self.timeline.add(ChatMessage("update", "纸条", f"纸条已更新到 {version}"), time.time())
+            self.timeline.add(ChatMessage("update", "", f"已更新到 {version}"), time.time())
+            updater.remove_applied_updates(self.staging)
             self.hud.update()
 
     def _check_update(self) -> None:

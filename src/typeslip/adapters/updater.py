@@ -58,6 +58,20 @@ def staged_update(staging: Path, current_version: str) -> tuple[UpdateManifest, 
     return manifest, path
 
 
+def remove_applied_updates(staging: Path) -> list[Path]:
+    """新版已经启动，删掉暂存目录里本程序的 update-*.exe。只动这个模式的文件。"""
+    removed: list[Path] = []
+    if not staging.is_dir():
+        return removed
+    for path in staging.glob("update-*.exe"):
+        try:
+            path.unlink()
+            removed.append(path)
+        except OSError:
+            pass  # 占用中就留到下次
+    return removed
+
+
 def record_pending(staging: Path, manifest: UpdateManifest) -> None:
     staging.mkdir(parents=True, exist_ok=True)
     (staging / "pending.json").write_text(json.dumps({

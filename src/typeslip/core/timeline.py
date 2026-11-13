@@ -12,6 +12,11 @@ class ChatMessage:
     text: str
     own: bool = False
 
+    @property
+    def line(self) -> str:
+        """HUD 上的一行：有昵称是「昵称：内容」，系统提示（无昵称）只有内容。"""
+        return f"{self.nickname}：{self.text}" if self.nickname else self.text
+
 
 class Timeline:
     """保留最近 `capacity` 条；HUD 只显示 `visible_limit` 条，每条 `fade_after` 秒后淡出。"""
