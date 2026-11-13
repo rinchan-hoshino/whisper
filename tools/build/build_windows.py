@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import shutil
+import os
 import subprocess
 import sys
 import tomllib
@@ -56,6 +57,7 @@ def main() -> None:
             f"--file-version={windows_version}",
             f"--product-version={windows_version}",
             "--copyright=Copyright 2026 RinChan",
+            "--include-package=typeslip",
             "--include-package=oopz_sdk",
             # Login comes from the installed Oopz client. The SDK's optional
             # browser login/voice runtime and test fixtures are not used here.
@@ -66,6 +68,7 @@ def main() -> None:
             str(ROOT / "tools" / "build" / "windows_entry.py"),
         ],
         cwd=ROOT,
+        env={**os.environ, "PYTHONPATH": str(ROOT / "src")},
         check=True,
     )
 
