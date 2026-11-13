@@ -8,7 +8,7 @@ from PySide6.QtGui import QColor, QFont, QImage, QPainter
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QApplication
 
-ASSETS = Path(__file__).resolve().parents[2] / 'src/oopz_overlay/assets'
+ASSETS = Path(__file__).resolve().parents[2] / 'src/typeslip/assets'
 SIZES = (16, 20, 24, 32, 48, 64, 128, 256)
 
 

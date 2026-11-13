@@ -33,7 +33,7 @@ def main() -> None:
             shutil.rmtree(directory, ignore_errors=True)
     dist.mkdir(parents=True, exist_ok=True)
     build.mkdir(parents=True, exist_ok=True)
-    icon_path = ROOT / 'src' / 'oopz_overlay' / 'assets' / 'icon.ico'
+    icon_path = ROOT / 'src' / 'typeslip' / 'assets' / 'icon.ico'
 
     subprocess.run(
         [
@@ -61,7 +61,7 @@ def main() -> None:
             # browser login/voice runtime and test fixtures are not used here.
             "--nofollow-import-to=oopz_sdk.testing,playwright,pytest",
             "--include-package-data=certifi",
-            "--include-package-data=oopz_overlay",
+            "--include-package-data=typeslip",
             f"--report={build / 'compilation-report.xml'}",
             str(ROOT / "tools" / "build" / "windows_entry.py"),
         ],

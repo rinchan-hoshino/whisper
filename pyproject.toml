@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "oopz-tactical-overlay"
-version = "1.0.4"
-description = "A focused Oopz text-channel overlay for borderless games"
+version = "2.0.0"
+description = "A focused Oopz text-channel overlay for borderless games (2.0)"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11,<3.14"
@@ -23,10 +23,10 @@ dev = [
 ]
 
 [project.scripts]
-oopz-tactical-overlay = "oopz_overlay.app:main"
+oopz-tactical-overlay = "typeslip.app:run"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/oopz_overlay"]
+packages = ["src/typeslip"]
 
 [tool.pytest.ini_options]
 addopts = "-q"
