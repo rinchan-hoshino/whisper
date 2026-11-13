@@ -83,7 +83,15 @@ def apply_update(staged: Path, target: Path, parent_pid: int, new_version: str) 
         try:
             temporary = target.with_suffix(".new")
             shutil.copy2(staged, temporary)
-            os.replace(temporary, target)
+            # Windows refuses to overwrite a running exe but allows renaming it aside.
+            previous = target.with_suffix(".old")
+            previous.unlink(missing_ok=True)
+            os.replace(target, previous)
+            try:
+                os.replace(temporary, target)
+            except OSError:
+                os.replace(previous, target)
+                raise
             (staged.parent / "updated.json").write_text(json.dumps({"version": new_version}), encoding="utf-8")
             subprocess.Popen([str(target)], close_fds=True)
             return

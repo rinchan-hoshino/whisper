@@ -76,6 +76,11 @@ class App(QObject):
         self.dir.mkdir(parents=True, exist_ok=True)
         self.staging = self.dir / "updates"
         migrate_if_needed(self.dir)
+        if getattr(sys, "frozen", False):
+            try:
+                Path(sys.argv[0]).resolve().with_suffix(".old").unlink(missing_ok=True)
+            except OSError:
+                pass  # 上次替换留下的旧程序，仍被占用就下次再删
         self.settings = settings_store.load(self.dir / "settings.json")
         self.timeline = Timeline(capacity=200, visible_limit=6, fade_after=10.0)
         self.hud = Hud(self.timeline)
