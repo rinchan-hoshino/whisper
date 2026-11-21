@@ -7,6 +7,7 @@ use std::time::Duration;
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
 
+use crate::core::lifecycle::SessionProbe;
 use crate::core::protocol::{
     build_send_message_v2_body, build_ws_auth_frame, build_ws_heartbeat_frame,
     build_ws_subscribe_area_frame, now_ms_string, parse_area_text_channels, parse_joined_areas,
@@ -20,7 +21,7 @@ pub const WM_APP_GATEWAY_EVENT: u32 = WM_APP + 102;
 
 #[derive(Debug, Clone)]
 pub enum GatewayEvent {
-    SessionLoaded(Result<LocalOopzSession, String>),
+    SessionLoaded(SessionProbe),
     AreasLoaded {
         areas: Vec<AreaInfo>,
     },
@@ -29,6 +30,7 @@ pub enum GatewayEvent {
         channels: Vec<TextChannel>,
     },
     StatusChanged {
+        generation: u64,
         connected: bool,
         text: String,
     },
@@ -48,6 +50,7 @@ pub enum GatewayEvent {
         ok: bool,
         error: Option<String>,
     },
+    AuthRejected(String),
     Error(String),
 }
 
@@ -57,6 +60,8 @@ pub struct GatewayHandle {
     signer: Arc<OopzSigner>,
     generation: Arc<AtomicU64>,
     ws_stop: Arc<Mutex<Option<Arc<AtomicBool>>>>,
+    active_ws: Arc<Mutex<Option<Arc<WinHttpWebSocket>>>>,
+    session_check_in_flight: Arc<AtomicBool>,
     names: Arc<Mutex<HashMap<String, String>>>,
 }
 
@@ -71,6 +76,8 @@ impl GatewayHandle {
                 signer,
                 generation: Arc::new(AtomicU64::new(0)),
                 ws_stop: Arc::new(Mutex::new(None)),
+                active_ws: Arc::new(Mutex::new(None)),
+                session_check_in_flight: Arc::new(AtomicBool::new(false)),
                 names: Arc::new(Mutex::new(HashMap::new())),
             },
             rx,
@@ -82,10 +89,19 @@ impl GatewayHandle {
     }
 
     pub fn check_session(&self) {
+        if self
+            .session_check_in_flight
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return;
+        }
         let hwnd = self.notify_hwnd;
         let tx = self.event_tx.clone();
+        let in_flight = Arc::clone(&self.session_check_in_flight);
         thread::spawn(move || {
-            let res = crate::platform::session::load_local_oopz_session();
+            let res = crate::platform::session::probe_local_oopz_session();
+            in_flight.store(false, Ordering::SeqCst);
             emit_to_ui(hwnd, &tx, GatewayEvent::SessionLoaded(res));
         });
     }
@@ -145,6 +161,13 @@ impl GatewayHandle {
                 flag.store(true, Ordering::SeqCst);
             }
         }
+        if let Ok(mut guard) = self.active_ws.lock() {
+            if let Some(ws) = guard.take() {
+                thread::spawn(move || {
+                    ws.close();
+                });
+            }
+        }
     }
 
     pub fn connect_channel(
@@ -165,6 +188,7 @@ impl GatewayHandle {
         let tx = self.event_tx.clone();
         let signer = Arc::clone(&self.signer);
         let gen_counter = Arc::clone(&self.generation);
+        let active_ws = Arc::clone(&self.active_ws);
         let names = Arc::clone(&self.names);
 
         thread::spawn(move || {
@@ -183,6 +207,15 @@ impl GatewayHandle {
                     Ok(ws) => {
                         backoff_secs = 2;
                         let ws = Arc::new(ws);
+                        if stop_flag.load(Ordering::SeqCst)
+                            || gen_counter.load(Ordering::SeqCst) != gen
+                        {
+                            ws.close();
+                            break;
+                        }
+                        if let Ok(mut guard) = active_ws.lock() {
+                            *guard = Some(Arc::clone(&ws));
+                        }
 
                         // 1. Send AUTH (253)
                         let auth_frame = build_ws_auth_frame(&session, &now_ms_string());
@@ -206,6 +239,7 @@ impl GatewayHandle {
                             hwnd,
                             &tx,
                             GatewayEvent::StatusChanged {
+                                generation: gen,
                                 connected: true,
                                 text: format!("#{channel_name}"),
                             },
@@ -291,7 +325,7 @@ impl GatewayHandle {
                                                 emit_to_ui(
                                                     hwnd,
                                                     &tx,
-                                                    GatewayEvent::Error(
+                                                    GatewayEvent::AuthRejected(
                                                         "Oopz 登录态已失效，请重新登录 Oopz。"
                                                             .to_string(),
                                                     ),
@@ -349,6 +383,11 @@ impl GatewayHandle {
                         }
 
                         hb_done.store(true, Ordering::SeqCst);
+                        if let Ok(mut guard) = active_ws.lock() {
+                            if guard.as_ref().is_some_and(|cur| Arc::ptr_eq(cur, &ws)) {
+                                *guard = None;
+                            }
+                        }
                         ws.close();
                         if auth_rejected {
                             break;
@@ -364,6 +403,7 @@ impl GatewayHandle {
                     hwnd,
                     &tx,
                     GatewayEvent::StatusChanged {
+                        generation: gen,
                         connected: false,
                         text: "连接中断，正在重连…".to_string(),
                     },

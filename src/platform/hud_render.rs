@@ -10,6 +10,7 @@ use windows::Win32::Graphics::DirectWrite::{
 };
 
 use crate::core::capsules::{parse_segments, TextSegment};
+use crate::core::lifecycle::top_bar_status_label;
 use crate::core::protocol::TextChannel;
 use crate::core::settings::{AppSettings, DockCorner};
 use crate::core::timeline::{ChatMessage, Timeline};
@@ -164,6 +165,7 @@ pub fn render_hud(
         }
 
         // Channel selector pill (`# 战术大厅 ▾`)
+        let mut pill_right = b.left + 120.0;
         let ch_text = if input.channel_label.is_empty() {
             "# 未选择频道 ▾".to_string()
         } else {
@@ -183,6 +185,7 @@ pub fn render_hud(
                 right: (b.left + 25.0 + tw + 14.0).min(b.right - 120.0),
                 bottom: b.top + top_bar_h - 4.0,
             };
+            pill_right = pill.right;
             hits.channel_pill_rect = pill;
             if input.channel_menu_open {
                 fill_round_rect(dc, pill, 6.0, rgba(255, 255, 255, 0.12));
@@ -202,32 +205,79 @@ pub fn render_hud(
             );
         }
 
-        // Right subtle micro-hints
-        let hint = if input.adjust_mode {
-            "拖动定位 · 右下角缩放 · Esc 完成"
+        // Right side of top bar: transient copied toast > amber disconnect/waiting status > subtle hints
+        if input.active && input.copied_toast.is_some() {
+            if let Some(toast) = input.copied_toast {
+                if let Ok(tfmt) = gfx.create_text_format(
+                    10.5,
+                    DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                    DWRITE_TEXT_ALIGNMENT_CENTER,
+                    DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+                    false,
+                ) {
+                    let max_w = (b.right - pill_right - 18.0).max(52.0);
+                    let (tw, _) = gfx.measure_text(toast, &tfmt, max_w - 16.0);
+                    let pw = (tw + 16.0).min(max_w);
+                    let pill = D2D_RECT_F {
+                        left: b.right - pw - 10.0,
+                        top: b.top + 4.0,
+                        right: b.right - 10.0,
+                        bottom: b.top + top_bar_h - 4.0,
+                    };
+                    fill_round_rect(dc, pill, 10.0, rgba(16, 185, 129, 0.24));
+                    stroke_round_rect(dc, pill, 10.0, rgba(52, 211, 153, 0.55), 1.0);
+                    draw_text_simple(dc, gfx, toast, &tfmt, pill, rgba(167, 243, 208, 0.98));
+                }
+            }
+        } else if let Some(status) = top_bar_status_label(input.connected, input.notice_text) {
+            if let Ok(sfmt) = gfx.create_text_format(
+                10.5,
+                DWRITE_FONT_WEIGHT_MEDIUM,
+                DWRITE_TEXT_ALIGNMENT_TRAILING,
+                DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+                false,
+            ) {
+                draw_text_simple(
+                    dc,
+                    gfx,
+                    &status,
+                    &sfmt,
+                    D2D_RECT_F {
+                        left: (pill_right + 8.0).min(b.right - 72.0),
+                        top: b.top,
+                        right: b.right - 12.0,
+                        bottom: b.top + top_bar_h,
+                    },
+                    rgba(251, 191, 36, 0.92),
+                );
+            }
         } else {
-            "Tab 切频 · 滚轮翻阅 · Esc 回游戏"
-        };
-        if let Ok(hfmt) = gfx.create_text_format(
-            10.5,
-            DWRITE_FONT_WEIGHT_NORMAL,
-            DWRITE_TEXT_ALIGNMENT_TRAILING,
-            DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
-            false,
-        ) {
-            draw_text_simple(
-                dc,
-                gfx,
-                hint,
-                &hfmt,
-                D2D_RECT_F {
-                    left: b.left + 120.0,
-                    top: b.top,
-                    right: b.right - 12.0,
-                    bottom: b.top + top_bar_h,
-                },
-                rgba(148, 163, 184, 0.78),
-            );
+            let hint = if input.adjust_mode {
+                "拖动定位 · 右下角缩放 · Esc 完成"
+            } else {
+                "Tab 切频 · 滚轮翻阅 · Esc 回游戏"
+            };
+            if let Ok(hfmt) = gfx.create_text_format(
+                10.5,
+                DWRITE_FONT_WEIGHT_NORMAL,
+                DWRITE_TEXT_ALIGNMENT_TRAILING,
+                DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+                false,
+            ) {
+                draw_text_simple(
+                    dc,
+                    gfx,
+                    hint,
+                    &hfmt,
+                    D2D_RECT_F {
+                        left: (pill_right + 8.0).min(b.right - 120.0),
+                        top: b.top,
+                        right: b.right - 12.0,
+                        bottom: b.top + top_bar_h,
+                    },
+                    rgba(148, 163, 184, 0.78),
+                );
+            }
         }
     }
 
@@ -575,25 +625,30 @@ pub fn render_hud(
         }
     }
 
-    // 5. Copied / Notice toast pill
-    if let Some(toast) = input.copied_toast.or(input.notice_text) {
-        if let Ok(fmt) = gfx.create_text_format(
-            11.5,
-            DWRITE_FONT_WEIGHT_SEMI_BOLD,
-            DWRITE_TEXT_ALIGNMENT_CENTER,
-            DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
-            false,
-        ) {
-            let (tw, _) = gfx.measure_text(toast, &fmt, w - 32.0);
-            let pw = (tw + 20.0).min(w - 24.0);
-            let pill = D2D_RECT_F {
-                left: b.left + (w - pw) * 0.5,
-                top: b.top + top_bar_h + 6.0,
-                right: b.left + (w + pw) * 0.5,
-                bottom: b.top + top_bar_h + 28.0,
-            };
-            fill_round_rect(dc, pill, 11.0, rgba(16, 185, 129, 0.92));
-            draw_text_simple(dc, gfx, toast, &fmt, pill, rgba(255, 255, 255, 1.0));
+    // 5. Transient copied/send toast in passive mode only (active mode renders it inside the top bar;
+    //    connection notice_text is NEVER rendered over message rows or in passive mode)
+    if !input.active && !input.adjust_mode {
+        if let Some(toast) = input.copied_toast {
+            if let Ok(fmt) = gfx.create_text_format(
+                10.5,
+                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                DWRITE_TEXT_ALIGNMENT_CENTER,
+                DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+                false,
+            ) {
+                let max_w = (w - 24.0).max(60.0);
+                let (tw, _) = gfx.measure_text(toast, &fmt, max_w - 16.0);
+                let pw = (tw + 16.0).min(max_w);
+                let pill = D2D_RECT_F {
+                    left: b.right - pw - 10.0,
+                    top: b.top + 2.0,
+                    right: b.right - 10.0,
+                    bottom: b.top + 22.0,
+                };
+                fill_round_rect(dc, pill, 10.0, rgba(16, 20, 28, 0.86));
+                stroke_round_rect(dc, pill, 10.0, rgba(148, 163, 184, 0.35), 1.0);
+                draw_text_simple(dc, gfx, toast, &fmt, pill, rgba(241, 245, 249, 0.96));
+            }
         }
     }
 

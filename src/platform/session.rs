@@ -9,6 +9,7 @@ use windows::Win32::System::Registry::{
     REG_VALUE_TYPE,
 };
 
+use crate::core::lifecycle::SessionProbe;
 use crate::core::protocol::{parse_oopz_login_value, LocalOopzSession};
 use crate::platform::to_wide_null;
 
@@ -42,6 +43,16 @@ pub fn oopz_is_running() -> bool {
         }
         let _ = CloseHandle(snap);
         found
+    }
+}
+
+pub fn probe_local_oopz_session() -> SessionProbe {
+    if !oopz_is_running() {
+        return SessionProbe::OopzNotRunning;
+    }
+    match load_local_oopz_session() {
+        Ok(sess) => SessionProbe::Ready(sess),
+        Err(err) => SessionProbe::Unavailable(err),
     }
 }
 

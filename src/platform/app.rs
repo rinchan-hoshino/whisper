@@ -21,7 +21,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::core::hotkey::HotkeySpec;
-use crate::core::protocol::{AreaInfo, LocalOopzSession, TextChannel};
+use crate::core::lifecycle::{ConnectionLifecycle, LifecycleAction};
+use crate::core::protocol::{AreaInfo, TextChannel};
 use crate::core::settings::{AppSettings, DockCorner};
 use crate::core::timeline::Timeline;
 use crate::platform::autostart::{is_autostart_enabled, set_autostart_enabled};
@@ -72,15 +73,13 @@ struct AppState {
     update_tx: mpsc::Sender<UpdateCheckResult>,
 
     settings: AppSettings,
-    session: Option<LocalOopzSession>,
+    lifecycle: ConnectionLifecycle,
     areas: Vec<AreaInfo>,
     channels: Vec<TextChannel>,
     sounds: Vec<SoundOption>,
     timeline: Timeline,
     start_instant: Instant,
 
-    connected: bool,
-    oopz_status_text: String,
     hud_visible: bool,
     hud_active: bool,
     adjust_mode: bool,
@@ -95,7 +94,6 @@ struct AppState {
     caret_visible: bool,
     scroll_offset_px: f32,
     copied_toast: Option<String>,
-    notice_text: Option<String>,
 
     // HUD drag/resize state
     drag_kind: DragKind,
@@ -161,14 +159,12 @@ pub fn run_app() -> Result<Option<(PathBuf, Option<PathBuf>)>, String> {
         update_rx,
         update_tx,
         settings,
-        session: None,
+        lifecycle: ConnectionLifecycle::new(),
         areas: Vec::new(),
         channels: Vec::new(),
         sounds,
         timeline: Timeline::default(),
         start_instant: Instant::now(),
-        connected: false,
-        oopz_status_text: "正在检测本机 Oopz 登录态…".to_string(),
         hud_visible: true,
         hud_active: false,
         adjust_mode: false,
@@ -181,7 +177,6 @@ pub fn run_app() -> Result<Option<(PathBuf, Option<PathBuf>)>, String> {
         caret_visible: true,
         scroll_offset_px: 0.0,
         copied_toast: None,
-        notice_text: None,
         drag_kind: DragKind::None,
         drag_start_cursor: POINT::default(),
         drag_orig_rect: RECT::default(),
@@ -200,7 +195,7 @@ pub fn run_app() -> Result<Option<(PathBuf, Option<PathBuf>)>, String> {
     state.register_hotkeys();
     state.gateway.check_session();
     unsafe {
-        let _ = SetTimer(state.hud.hwnd, TIMER_SESSION_POLL, 5000, None);
+        let _ = SetTimer(state.hud.hwnd, TIMER_SESSION_POLL, 2500, None);
     }
     if state.settings.area_id.is_empty() || state.settings.channel_id.is_empty() {
         // First run or no channel chosen yet -> open Settings window
@@ -356,7 +351,7 @@ impl AppState {
                 opacities: &opacities,
                 active: self.hud_active,
                 adjust_mode: self.adjust_mode,
-                connected: self.connected,
+                connected: self.lifecycle.connected,
                 channel_label: &ch_label,
                 channels: &self.channels,
                 channel_menu_open: self.channel_menu_open,
@@ -367,7 +362,7 @@ impl AppState {
                 scroll_offset_px: self.scroll_offset_px,
                 unread_count: self.timeline.unread,
                 copied_toast: self.copied_toast.as_deref(),
-                notice_text: self.notice_text.as_deref(),
+                notice_text: self.lifecycle.notice_text.as_deref(),
             },
         );
         self.sync_timers();
@@ -379,8 +374,8 @@ impl AppState {
         }
         let view = SettingsViewState {
             settings: &self.settings,
-            connected: self.connected,
-            oopz_status_text: &self.oopz_status_text,
+            connected: self.lifecycle.connected,
+            oopz_status_text: &self.lifecycle.oopz_status_text,
             areas: &self.areas,
             channels: &self.channels,
             sounds: &self.sounds,
@@ -478,7 +473,7 @@ impl AppState {
     fn show_toast(&mut self, text: &str) {
         self.copied_toast = Some(text.to_string());
         unsafe {
-            let _ = SetTimer(self.hud.hwnd, TIMER_TOAST, 1600, None);
+            let _ = SetTimer(self.hud.hwnd, TIMER_TOAST, 1500, None);
         }
         self.render_hud();
     }
@@ -514,10 +509,10 @@ impl AppState {
         self.settings.channel_name.clear();
         self.channels.clear();
         self.timeline.clear();
-        self.connected = false;
-        self.oopz_status_text = format!("已选择服务器 · {area_name}");
+        self.gateway.disconnect();
+        self.lifecycle.on_area_cleared(&area_name);
         let _ = save_settings(&self.settings);
-        if let Some(sess) = self.session.clone() {
+        if let Some(sess) = self.lifecycle.session.clone() {
             self.gateway.fetch_channels(sess, area_id, area_name);
         }
         self.render_settings();
@@ -529,8 +524,9 @@ impl AppState {
         self.settings.channel_name = channel_name.clone();
         self.timeline.clear();
         let _ = save_settings(&self.settings);
-        if let Some(sess) = self.session.clone() {
+        if let Some(sess) = self.lifecycle.session.clone() {
             if !self.settings.area_id.is_empty() {
+                self.lifecycle.on_manual_connect(self.now_secs());
                 self.gateway.connect_channel(
                     sess,
                     self.settings.area_id.clone(),
@@ -548,46 +544,50 @@ impl AppState {
         let mut settings_dirty = false;
         while let Ok(ev) = self.gateway_rx.try_recv() {
             match ev {
-                GatewayEvent::SessionLoaded(Ok(sess)) => {
-                    let changed = self.session.as_ref() != Some(&sess);
-                    self.settings.device_id = sess.device_id.clone();
-                    self.settings.person_uid = sess.person_uid.clone();
-                    self.settings.jwt_token = sess.jwt_token.clone();
-                    self.settings.app_version = sess.app_version.clone();
-                    self.session = Some(sess.clone());
-                    if changed {
-                        self.oopz_status_text = if self.settings.area_name.is_empty() {
-                            "已连接 Oopz · 正在拉取服务器…".to_string()
-                        } else {
-                            format!("已连接 Oopz · {}", self.settings.area_name)
-                        };
-                        self.gateway.fetch_areas(sess.clone());
-                        if !self.settings.area_id.is_empty() && !self.settings.channel_id.is_empty() {
-                            self.gateway.connect_channel(
-                                sess,
-                                self.settings.area_id.clone(),
-                                self.settings.channel_id.clone(),
-                                self.settings.channel_name.clone(),
-                            );
+                GatewayEvent::SessionLoaded(probe) => {
+                    let now = self.now_secs();
+                    let update = self.lifecycle.on_session_probe(
+                        probe,
+                        now,
+                        &self.settings.area_id,
+                        &self.settings.area_name,
+                        &self.settings.channel_id,
+                        !self.areas.is_empty(),
+                    );
+                    if let Some(sess) = &self.lifecycle.session {
+                        self.settings.device_id = sess.device_id.clone();
+                        self.settings.person_uid = sess.person_uid.clone();
+                        self.settings.jwt_token = sess.jwt_token.clone();
+                        self.settings.app_version = sess.app_version.clone();
+                    }
+                    for action in update.actions {
+                        match action {
+                            LifecycleAction::Disconnect => self.gateway.disconnect(),
+                            LifecycleAction::FetchAreas(sess) => self.gateway.fetch_areas(sess),
+                            LifecycleAction::ConnectChannel(sess) => {
+                                self.gateway.connect_channel(
+                                    sess,
+                                    self.settings.area_id.clone(),
+                                    self.settings.channel_id.clone(),
+                                    self.settings.channel_name.clone(),
+                                );
+                            }
                         }
-                        settings_dirty = true;
                     }
-                }
-                GatewayEvent::SessionLoaded(Err(err)) => {
-                    if self.session.is_none() {
-                        self.oopz_status_text = err;
-                        self.connected = false;
-                        settings_dirty = true;
-                    }
+                    hud_dirty |= update.hud_dirty;
+                    settings_dirty |= update.settings_dirty;
                 }
                 GatewayEvent::AreasLoaded { areas } => {
                     self.areas = areas;
-                    if let Some(sess) = self.session.clone() {
+                    if let Some(sess) = self.lifecycle.session.clone() {
                         if self.settings.area_id.is_empty() {
                             if let Some(first) = self.areas.first().cloned() {
                                 self.settings.area_id = first.area_id.clone();
                                 self.settings.area_name = first.name.clone();
-                                self.oopz_status_text = format!("已连接 Oopz · {}", first.name);
+                                if !self.lifecycle.oopz_out {
+                                    self.lifecycle.oopz_status_text =
+                                        format!("已连接 Oopz · {}", first.name);
+                                }
                                 self.gateway.fetch_channels(sess, first.area_id, first.name);
                             }
                         } else {
@@ -595,7 +595,10 @@ impl AppState {
                                 self.areas.iter().find(|a| a.area_id == self.settings.area_id)
                             {
                                 self.settings.area_name = found.name.clone();
-                                self.oopz_status_text = format!("已连接 Oopz · {}", found.name);
+                                if self.lifecycle.connected {
+                                    self.lifecycle.oopz_status_text =
+                                        format!("已连接 Oopz · {}", found.name);
+                                }
                             }
                             self.gateway.fetch_channels(
                                 sess,
@@ -624,16 +627,20 @@ impl AppState {
                         hud_dirty = true;
                     }
                 }
-                GatewayEvent::StatusChanged { connected, text } => {
-                    self.connected = connected;
-                    if connected && !self.settings.area_name.is_empty() {
-                        self.oopz_status_text =
-                            format!("已连接 Oopz · {}", self.settings.area_name);
-                    } else if !connected {
-                        self.notice_text = Some(text);
+                GatewayEvent::StatusChanged {
+                    generation,
+                    connected,
+                    text,
+                } => {
+                    if generation == self.gateway.current_generation() {
+                        let update = self.lifecycle.on_status_changed(
+                            connected,
+                            text,
+                            &self.settings.area_name,
+                        );
+                        hud_dirty |= update.hud_dirty;
+                        settings_dirty |= update.settings_dirty;
                     }
-                    settings_dirty = true;
-                    hud_dirty = true;
                 }
                 GatewayEvent::HistoryLoaded {
                     generation,
@@ -681,10 +688,15 @@ impl AppState {
                         }
                     }
                 }
+                GatewayEvent::AuthRejected(e) => {
+                    let update = self.lifecycle.on_gateway_error(e, true);
+                    hud_dirty |= update.hud_dirty;
+                    settings_dirty |= update.settings_dirty;
+                }
                 GatewayEvent::Error(e) => {
-                    self.notice_text = Some(e);
-                    hud_dirty = true;
-                    settings_dirty = true;
+                    let update = self.lifecycle.on_gateway_error(e, false);
+                    hud_dirty |= update.hud_dirty;
+                    settings_dirty |= update.settings_dirty;
                 }
             }
         }
@@ -1323,13 +1335,10 @@ unsafe extern "system" fn hud_wndproc(
                 TIMER_TOAST => {
                     let _ = KillTimer(app.hud.hwnd, TIMER_TOAST);
                     app.copied_toast = None;
-                    app.notice_text = None;
                     app.render_hud();
                 }
                 TIMER_SESSION_POLL => {
-                    if app.session.is_none() || !app.connected {
-                        app.gateway.check_session();
-                    }
+                    app.gateway.check_session();
                 }
                 _ => {}
             });
@@ -1424,7 +1433,7 @@ unsafe extern "system" fn hud_wndproc(
                     let text = app.draft.trim().to_string();
                     app.draft.clear();
                     if !text.is_empty() {
-                        if let Some(sess) = app.session.clone() {
+                        if let Some(sess) = app.lifecycle.session.clone() {
                             if !app.settings.area_id.is_empty()
                                 && !app.settings.channel_id.is_empty()
                             {

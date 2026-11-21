@@ -1,6 +1,6 @@
 [package]
 name = "whisper"
-version = "2.0.1"
+version = "2.0.2"
 edition = "2021"
 description = "Whisper — Native DirectComposition / Direct2D tactical chat overlay for Oopz"
 license = "MIT"
