@@ -81,9 +81,39 @@ pub fn hex_lower(bytes: &[u8]) -> String {
     out
 }
 
+/// Returns true if a binary or shortcut stem (without `.exe`/`.lnk`) belongs to a legacy pre-Whisper release.
+pub fn is_legacy_app_stem(stem: &str) -> bool {
+    let trimmed = stem.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower == "whisper" {
+        return false;
+    }
+    lower.starts_with("oopz")
+        || lower.starts_with("typeslip")
+        || lower.starts_with("papernote")
+        || trimmed.contains("纸条")
+        || trimmed.contains("战术浮层")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_stem_detection() {
+        assert!(is_legacy_app_stem("OopzOverlay"));
+        assert!(is_legacy_app_stem("OopzTacticalOverlay"));
+        assert!(is_legacy_app_stem("TypeSlip"));
+        assert!(is_legacy_app_stem("PaperNote"));
+        assert!(is_legacy_app_stem("纸条"));
+        assert!(is_legacy_app_stem("Oopz 战术浮层"));
+        assert!(!is_legacy_app_stem("Whisper"));
+        assert!(!is_legacy_app_stem("whisper"));
+        assert!(!is_legacy_app_stem("Notepad"));
+    }
 
     #[test]
     fn manifest_origin_and_sha256_validation() {

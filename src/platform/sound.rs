@@ -15,20 +15,13 @@ pub struct SoundOption {
     pub key: String,
 }
 
-const RECOMMENDED_SOUNDS: [(&str, &str); 4] = [
-    ("Windows Navigation Start.wav", "清脆轻点 (Navigation Start)"),
-    ("Windows Menu Command.wav", "短促嘀嗒 (Menu Command)"),
-    ("Windows Feed Discovered.wav", "轻柔水滴 (Feed Discovered)"),
-    ("Windows Information Bar.wav", "柔和提示 (Information Bar)"),
-];
-
 fn media_root() -> PathBuf {
     let sysroot = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
     PathBuf::from(sysroot).join("Media")
 }
 
 /// Enumerate `C:\Windows\Media` (root + 1-level theme subdirs) for `.wav` files.
-/// Recommended short sounds come first, followed by builtin 64ms synthesized tap, then remaining wavs.
+/// Item 0 is fixed as `"内置轻触音"` (`BUILTIN_TAP_SOUND`), followed by `.wav` files sorted alphabetically by original name.
 pub fn enumerate_sounds() -> Vec<SoundOption> {
     let root = media_root();
     let mut found_rel: Vec<String> = Vec::new();
@@ -61,22 +54,9 @@ pub fn enumerate_sounds() -> Vec<SoundOption> {
 
     found_rel.sort_by(|a, b| a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase()));
 
-    let mut options: Vec<SoundOption> = Vec::new();
-    for (rec_file, rec_label) in RECOMMENDED_SOUNDS {
-        if let Some(pos) = found_rel
-            .iter()
-            .position(|x| x.eq_ignore_ascii_case(rec_file))
-        {
-            let key = found_rel.remove(pos);
-            options.push(SoundOption {
-                label: rec_label.to_string(),
-                key,
-            });
-        }
-    }
-
+    let mut options: Vec<SoundOption> = Vec::with_capacity(found_rel.len() + 1);
     options.push(SoundOption {
-        label: "内置轻触音 (64ms 合成)".to_string(),
+        label: "内置轻触音".to_string(),
         key: BUILTIN_TAP_SOUND.to_string(),
     });
 

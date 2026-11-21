@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.0.1] - 2026-11-21
+
+### 体验打磨与修复
+- **平时态真鼠标穿透与光标修复**：为 DirectComposition 顶层 HUD 窗口补全 `WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE` + `SWP_FRAMECHANGED` 切换与 `WM_NCHITTEST -> HTTRANSPARENT`，实现 100% 鼠标悬停与点击穿透；窗口类显式绑定 `IDC_ARROW` 与应用图标并正确响应 `WM_SETCURSOR`，彻底消除启动转圈光标。
+- **真 DirectWrite 矢量字形均匀圆角描边**：移除旧版 4 方向偏移假描边，通过 `IDWriteTextRenderer` + `GetGlyphRunOutline` + 圆角 `ID2D1StrokeStyle` 实现 360° 均匀瓷实暗色描边，纯白亮色背景下同样锐利清晰。
+- **全新 Whisper 专属多尺寸图标**：重新设计深海石板蓝与冰青声波轻语徽记，嵌入 `16~256px` 全尺寸 `.ico` 并同步更新设置窗标题栏左上角徽记。
+- **老版本原位改名与快捷方式自动迁移**：升级或启动时自动将 `OopzOverlay.exe` / `TypeSlip.exe` / `纸条.exe` 等旧名原位迁移为 `Whisper.exe`，同步迁移注册表开机自启项与桌面/开始菜单/启动文件夹 `.lnk` 快捷方式并刷新外壳图标缓存。
+- **精简提示音下拉列表**：移除人为重命名的推荐预设，第 0 项固定为「内置轻触音」，其后直接按原文件名自然字母顺序列出系统 `.wav` 音效并保持老配置无损匹配。
+
 ## [2.0.0] - 2026-11-21
 
 ### 重写与更名

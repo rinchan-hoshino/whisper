@@ -4,6 +4,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Instant;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::ScreenToClient;
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, RegisterHotKey, ReleaseCapture, SetCapture, UnregisterHotKey, VK_BACK,
@@ -11,10 +12,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     DefWindowProcW, DispatchMessageW, GetCursorPos, GetMessageW, GetSystemMetrics, KillTimer,
-    PostMessageW, PostQuitMessage, SendMessageW, SetTimer, ShowWindow,
-    TranslateMessage, HTCAPTION, MSG, SM_CXSCREEN, SM_CYSCREEN, SW_MINIMIZE, WM_APP, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_HOTKEY,
-    WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCLBUTTONDOWN, WM_RBUTTONUP, WM_TIMER,
+    LoadCursorW, PostMessageW, PostQuitMessage, SendMessageW, SetCursor, SetTimer, ShowWindow,
+    TranslateMessage, HTCAPTION, HTCLIENT, HTTRANSPARENT, IDC_ARROW, IDC_HAND, IDC_IBEAM,
+    IDC_SIZEALL, IDC_SIZENWSE, MSG, SM_CXSCREEN, SM_CYSCREEN, SW_MINIMIZE, WM_APP, WM_CHAR,
+    WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_HOTKEY, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION,
+    WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER,
 };
 
 use crate::core::hotkey::HotkeySpec;
@@ -111,7 +114,7 @@ struct AppState {
     // On-demand timer flags (0% idle redraw)
     fade_timer_on: bool,
     caret_timer_on: bool,
-    relaunch_exe: Option<PathBuf>,
+    relaunch_exe: Option<(PathBuf, Option<PathBuf>)>,
 }
 
 thread_local! {
@@ -131,7 +134,7 @@ where
     })
 }
 
-pub fn run_app() -> Result<Option<PathBuf>, String> {
+pub fn run_app() -> Result<Option<(PathBuf, Option<PathBuf>)>, String> {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
     }
@@ -719,9 +722,9 @@ impl AppState {
                     self.update_status = format!("已是最新版本 v{v}");
                     self.render_settings();
                 }
-                UpdateCheckResult::UpdatedAndRestarting(v, exe_path) => {
+                UpdateCheckResult::UpdatedAndRestarting(v, exe_path, old_path) => {
                     self.update_status = format!("已更新至 v{v}，正在重启…");
-                    self.relaunch_exe = Some(exe_path);
+                    self.relaunch_exe = Some((exe_path, old_path));
                     self.render_settings();
                     unsafe {
                         PostQuitMessage(0);
@@ -1128,6 +1131,99 @@ fn lparam_to_dip(lparam: LPARAM, dpi: f32) -> (f32, f32) {
     (x_px / scale, y_px / scale)
 }
 
+fn cursor_pos_in_dip(hwnd: HWND, dpi: f32) -> Option<(f32, f32)> {
+    unsafe {
+        let mut pt = POINT::default();
+        if GetCursorPos(&mut pt).is_ok() && ScreenToClient(hwnd, &mut pt).as_bool() {
+            let scale = (dpi / 96.0).max(1.0);
+            return Some((pt.x as f32 / scale, pt.y as f32 / scale));
+        }
+    }
+    None
+}
+
+fn hud_cursor_for_point(app: &AppState, x: f32, y: f32) -> windows::core::PCWSTR {
+    if !app.hud_active && !app.adjust_mode {
+        return IDC_ARROW;
+    }
+    if point_in_rect(x, y, app.hud.hits.resize_grip_rect) {
+        return IDC_SIZENWSE;
+    }
+    if app.adjust_mode {
+        return IDC_SIZEALL;
+    }
+    if app.channel_menu_open
+        && app
+            .hud
+            .hits
+            .channel_menu_items
+            .iter()
+            .any(|it| point_in_rect(x, y, it.rect))
+    {
+        return IDC_HAND;
+    }
+    if point_in_rect(x, y, app.hud.hits.channel_pill_rect) {
+        return IDC_HAND;
+    }
+    if let Some(pill) = app.hud.hits.unread_pill_rect {
+        if point_in_rect(x, y, pill) {
+            return IDC_HAND;
+        }
+    }
+    if app
+        .hud
+        .hits
+        .capsules
+        .iter()
+        .any(|c| point_in_rect(x, y, c.rect))
+    {
+        return IDC_HAND;
+    }
+    if point_in_rect(x, y, app.hud.hits.input_rect) {
+        return IDC_IBEAM;
+    }
+    if point_in_rect(x, y, app.hud.hits.top_bar_rect) {
+        return IDC_SIZEALL;
+    }
+    IDC_ARROW
+}
+
+fn settings_cursor_for_point(app: &AppState, x: f32, y: f32) -> windows::core::PCWSTR {
+    let h = &app.settings_win.hits;
+    if app.open_dropdown != OpenDropdown::None {
+        if h.popup_items.iter().any(|(r, _)| point_in_rect(x, y, *r)) {
+            return IDC_HAND;
+        }
+        return IDC_ARROW;
+    }
+    let hand_rects = [
+        h.btn_minimize,
+        h.btn_close,
+        h.btn_preview_sand,
+        h.btn_preview_night,
+        h.btn_drag_position,
+        h.dd_area,
+        h.dd_channel,
+        h.hk_activate,
+        h.hk_visibility,
+        h.slider_font,
+        h.slider_text_opacity,
+        h.slider_backdrop,
+        h.toggle_always_visible,
+        h.toggle_notify_sound,
+        h.dd_sound,
+        h.btn_preview_sound,
+        h.toggle_autostart,
+        h.btn_check_update,
+    ];
+    if hand_rects.iter().any(|r| point_in_rect(x, y, *r))
+        || h.dock_rects.iter().any(|(_, r)| point_in_rect(x, y, *r))
+    {
+        return IDC_HAND;
+    }
+    IDC_ARROW
+}
+
 unsafe extern "system" fn hud_wndproc(
     hwnd: HWND,
     msg: u32,
@@ -1135,6 +1231,29 @@ unsafe extern "system" fn hud_wndproc(
     lparam: LPARAM,
 ) -> LRESULT {
     match msg {
+        WM_NCHITTEST => {
+            let passive = with_app(|app| !app.hud_active && !app.adjust_mode).unwrap_or(true);
+            if passive {
+                LRESULT(HTTRANSPARENT as isize)
+            } else {
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+        }
+        WM_SETCURSOR => {
+            if (lparam.0 & 0xFFFF) as u32 == HTCLIENT {
+                let cursor_id = with_app(|app| {
+                    cursor_pos_in_dip(hwnd, app.hud.dpi())
+                        .map(|(x, y)| hud_cursor_for_point(app, x, y))
+                        .unwrap_or(IDC_ARROW)
+                })
+                .unwrap_or(IDC_ARROW);
+                if let Ok(hc) = LoadCursorW(None, cursor_id) {
+                    let _ = SetCursor(hc);
+                }
+                return LRESULT(1);
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
         WM_HOTKEY => {
             let id = wparam.0 as i32;
             with_app(|app| {
@@ -1379,6 +1498,21 @@ unsafe extern "system" fn settings_wndproc(
     lparam: LPARAM,
 ) -> LRESULT {
     match msg {
+        WM_SETCURSOR => {
+            if (lparam.0 & 0xFFFF) as u32 == HTCLIENT {
+                let cursor_id = with_app(|app| {
+                    cursor_pos_in_dip(hwnd, app.settings_win.dpi())
+                        .map(|(x, y)| settings_cursor_for_point(app, x, y))
+                        .unwrap_or(IDC_ARROW)
+                })
+                .unwrap_or(IDC_ARROW);
+                if let Ok(hc) = LoadCursorW(None, cursor_id) {
+                    let _ = SetCursor(hc);
+                }
+                return LRESULT(1);
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
         WM_CLOSE => {
             with_app(|app| app.close_settings());
             LRESULT(0)

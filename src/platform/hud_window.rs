@@ -1,5 +1,5 @@
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{BOOL, HWND, LPARAM, POINT, RECT};
+use windows::Win32::Foundation::{BOOL, HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
@@ -14,11 +14,13 @@ use windows::Win32::UI::Input::Ime::{
 use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect,
-    GetWindowThreadProcessId, IsIconic, IsWindow, RegisterClassW, SetForegroundWindow,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, CS_HREDRAW, CS_VREDRAW, GWL_EXSTYLE, HWND_TOPMOST,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE,
-    SW_SHOWNA, WNDCLASSW, WNDPROC, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    GetWindowThreadProcessId, IsIconic, IsWindow, LoadCursorW, LoadIconW, RegisterClassW,
+    SendMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, CS_HREDRAW,
+    CS_VREDRAW, GWL_EXSTYLE, HWND_TOPMOST, ICON_BIG, ICON_SMALL, IDC_ARROW, IDI_APPLICATION,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER,
+    SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNA, WM_SETICON, WNDCLASSW, WNDPROC, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 use crate::platform::d2d::{DCompTarget, GraphicsEngine};
@@ -46,10 +48,16 @@ impl HudWindow {
         unsafe {
             let hinst = windows::Win32::System::LibraryLoader::GetModuleHandleW(None)
                 .map_err(|e| format!("GetModuleHandleW failed: {e}"))?;
+            let hicon = LoadIconW(hinst, PCWSTR(1usize as *const u16))
+                .or_else(|_| LoadIconW(None, IDI_APPLICATION))
+                .unwrap_or_default();
+            let hcursor = LoadCursorW(None, IDC_ARROW).unwrap_or_default();
             let wc = WNDCLASSW {
                 style: CS_HREDRAW | CS_VREDRAW,
                 lpfnWndProc: wndproc,
                 hInstance: hinst.into(),
+                hIcon: hicon,
+                hCursor: hcursor,
                 lpszClassName: PCWSTR(class_w.as_ptr()),
                 ..Default::default()
             };
@@ -58,8 +66,7 @@ impl HudWindow {
             let ex_style = WS_EX_NOREDIRECTIONBITMAP
                 | WS_EX_TOOLWINDOW
                 | WS_EX_TOPMOST
-                | WS_EX_NOACTIVATE
-                | WS_EX_TRANSPARENT;
+                | WS_EX_NOACTIVATE;
 
             let hwnd = CreateWindowExW(
                 ex_style,
@@ -77,14 +84,31 @@ impl HudWindow {
             )
             .map_err(|e| format!("CreateWindowExW HUD failed: {e}"))?;
 
+            if !hicon.0.is_null() {
+                let _ = SendMessageW(
+                    hwnd,
+                    WM_SETICON,
+                    WPARAM(ICON_BIG as usize),
+                    LPARAM(hicon.0 as isize),
+                );
+                let _ = SendMessageW(
+                    hwnd,
+                    WM_SETICON,
+                    WPARAM(ICON_SMALL as usize),
+                    LPARAM(hicon.0 as isize),
+                );
+            }
+
             let dpi = GetDpiForWindow(hwnd).max(96) as f32;
             let target = DCompTarget::new(gfx, hwnd, w.max(260) as u32, h.max(135) as u32, dpi)?;
-            let _ = ShowWindow(hwnd, SW_SHOWNA);
-            Ok(Self {
+            let win = Self {
                 hwnd,
                 target,
                 hits: HudHitMap::default(),
-            })
+            };
+            win.set_click_through(true);
+            let _ = ShowWindow(hwnd, SW_SHOWNA);
+            Ok(win)
         }
     }
 
@@ -101,7 +125,7 @@ impl HudWindow {
     pub fn set_click_through(&self, click_through: bool) {
         unsafe {
             let mut ex = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE) as u32;
-            let passive_bits = (WS_EX_TRANSPARENT | WS_EX_NOACTIVATE).0;
+            let passive_bits = (WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE).0;
             if click_through {
                 ex |= passive_bits;
             } else {
@@ -110,12 +134,12 @@ impl HudWindow {
             SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, ex as isize);
             let _ = SetWindowPos(
                 self.hwnd,
-                HWND_TOPMOST,
+                None,
                 0,
                 0,
                 0,
                 0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
             );
         }
     }

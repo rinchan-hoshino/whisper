@@ -1,14 +1,18 @@
-use windows::core::{Interface, PCWSTR};
-use windows::Win32::Foundation::HWND;
+use std::ffi::c_void;
+use windows::core::{implement, IUnknown, Interface, PCWSTR};
+use windows::Foundation::Numerics::Matrix3x2;
+use windows::Win32::Foundation::{BOOL, HWND};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_POINT_2F, D2D_RECT_F,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1CreateFactory, ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1,
-    ID2D1SolidColorBrush, D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_TARGET,
-    D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_CLIP,
-    D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT, D2D1_FACTORY_TYPE_SINGLE_THREADED,
-    D2D1_ROUNDED_RECT, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
+    D2D1CreateFactory, ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext, ID2D1Factory, ID2D1Factory1,
+    ID2D1RenderTarget, ID2D1SolidColorBrush, ID2D1StrokeStyle, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+    D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
+    D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE_SOLID, D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
+    D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT,
+    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_LINE_JOIN_ROUND, D2D1_ROUNDED_RECT,
+    D2D1_STROKE_STYLE_PROPERTIES, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
 };
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL_11_0,
@@ -21,10 +25,13 @@ use windows::Win32::Graphics::DirectComposition::{
     DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget, IDCompositionVisual,
 };
 use windows::Win32::Graphics::DirectWrite::{
-    DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, IDWriteTextLayout,
+    DWriteCreateFactory, IDWriteFactory, IDWriteInlineObject, IDWritePixelSnapping_Impl,
+    IDWriteTextFormat, IDWriteTextLayout, IDWriteTextRenderer, IDWriteTextRenderer_Impl,
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-    DWRITE_FONT_WEIGHT, DWRITE_PARAGRAPH_ALIGNMENT, DWRITE_TEXT_ALIGNMENT, DWRITE_TEXT_METRICS,
-    DWRITE_WORD_WRAPPING_NO_WRAP, DWRITE_WORD_WRAPPING_WRAP,
+    DWRITE_FONT_WEIGHT, DWRITE_GLYPH_RUN, DWRITE_GLYPH_RUN_DESCRIPTION, DWRITE_MATRIX,
+    DWRITE_MEASURING_MODE, DWRITE_PARAGRAPH_ALIGNMENT, DWRITE_STRIKETHROUGH,
+    DWRITE_TEXT_ALIGNMENT, DWRITE_TEXT_METRICS, DWRITE_UNDERLINE, DWRITE_WORD_WRAPPING_NO_WRAP,
+    DWRITE_WORD_WRAPPING_WRAP,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
@@ -51,10 +58,11 @@ pub struct GraphicsEngine {
     pub _d3d_device: ID3D11Device,
     pub dxgi_device: IDXGIDevice,
     pub dxgi_factory: IDXGIFactory2,
-    pub _d2d_factory: ID2D1Factory1,
+    pub d2d_factory: ID2D1Factory1,
     pub d2d_device: ID2D1Device,
     pub dwrite: IDWriteFactory,
     pub dcomp: IDCompositionDevice,
+    pub round_stroke_style: ID2D1StrokeStyle,
 }
 
 impl GraphicsEngine {
@@ -108,15 +116,27 @@ impl GraphicsEngine {
                 .map_err(|e| format!("DWriteCreateFactory failed: {e}"))?;
             let dcomp: IDCompositionDevice = DCompositionCreateDevice(&dxgi_device)
                 .map_err(|e| format!("DCompositionCreateDevice failed: {e}"))?;
+            let stroke_props = D2D1_STROKE_STYLE_PROPERTIES {
+                startCap: D2D1_CAP_STYLE_ROUND,
+                endCap: D2D1_CAP_STYLE_ROUND,
+                dashCap: D2D1_CAP_STYLE_ROUND,
+                lineJoin: D2D1_LINE_JOIN_ROUND,
+                miterLimit: 1.0,
+                dashStyle: D2D1_DASH_STYLE_SOLID,
+                dashOffset: 0.0,
+            };
+            let round_stroke_style = ID2D1Factory::CreateStrokeStyle(&d2d_factory, &stroke_props, None)
+                .map_err(|e| format!("CreateStrokeStyle failed: {e}"))?;
 
             Ok(Self {
                 _d3d_device: d3d_device,
                 dxgi_device,
                 dxgi_factory,
-                _d2d_factory: d2d_factory,
+                d2d_factory,
                 d2d_device,
                 dwrite,
                 dcomp,
+                round_stroke_style,
             })
         }
     }
@@ -420,7 +440,157 @@ pub fn draw_text_simple(
     }
 }
 
-/// Crisp game-HUD text with tight dark outline/shadow so white text remains razor-sharp on bright sand.
+#[implement(IDWriteTextRenderer)]
+struct OutlineTextRenderer {
+    d2d_factory: ID2D1Factory1,
+    dc: ID2D1DeviceContext,
+    outline_brush: ID2D1SolidColorBrush,
+    fg_brush: ID2D1SolidColorBrush,
+    stroke_style: ID2D1StrokeStyle,
+    draw_outline: bool,
+}
+
+impl IDWritePixelSnapping_Impl for OutlineTextRenderer_Impl {
+    fn IsPixelSnappingDisabled(&self, _clientdrawingcontext: *const c_void) -> windows::core::Result<BOOL> {
+        Ok(BOOL(0))
+    }
+
+    fn GetCurrentTransform(
+        &self,
+        _clientdrawingcontext: *const c_void,
+        transform: *mut DWRITE_MATRIX,
+    ) -> windows::core::Result<()> {
+        if !transform.is_null() {
+            unsafe {
+                *transform = DWRITE_MATRIX {
+                    m11: 1.0,
+                    m12: 0.0,
+                    m21: 0.0,
+                    m22: 1.0,
+                    dx: 0.0,
+                    dy: 0.0,
+                };
+            }
+        }
+        Ok(())
+    }
+
+    fn GetPixelsPerDip(&self, _clientdrawingcontext: *const c_void) -> windows::core::Result<f32> {
+        let mut dpi_x = 96.0f32;
+        let mut dpi_y = 96.0f32;
+        unsafe {
+            self.dc.GetDpi(&mut dpi_x, &mut dpi_y);
+        }
+        Ok((dpi_x / 96.0).max(1.0))
+    }
+}
+
+impl IDWriteTextRenderer_Impl for OutlineTextRenderer_Impl {
+    fn DrawGlyphRun(
+        &self,
+        _clientdrawingcontext: *const c_void,
+        baselineoriginx: f32,
+        baselineoriginy: f32,
+        measuringmode: DWRITE_MEASURING_MODE,
+        glyphrun: *const DWRITE_GLYPH_RUN,
+        _glyphrundescription: *const DWRITE_GLYPH_RUN_DESCRIPTION,
+        _clientdrawingeffect: Option<&IUnknown>,
+    ) -> windows::core::Result<()> {
+        unsafe {
+            let Some(run) = glyphrun.as_ref() else {
+                return Ok(());
+            };
+            if run.glyphCount == 0 {
+                return Ok(());
+            }
+            let Some(font_face) = run.fontFace.as_ref() else {
+                return Ok(());
+            };
+
+            let path_geom = self.d2d_factory.CreatePathGeometry()?;
+            let sink = path_geom.Open()?;
+            let outline_res = font_face.GetGlyphRunOutline(
+                run.fontEmSize,
+                run.glyphIndices,
+                Some(run.glyphAdvances),
+                Some(run.glyphOffsets),
+                run.glyphCount,
+                run.isSideways.as_bool(),
+                (run.bidiLevel & 1) != 0,
+                &sink,
+            );
+            let _ = sink.Close();
+
+            if outline_res.is_ok() {
+                let translation = Matrix3x2::translation(baselineoriginx, baselineoriginy);
+                let translated = self
+                    .d2d_factory
+                    .CreateTransformedGeometry(&path_geom, &translation)?;
+                if self.draw_outline {
+                    let stroke_width = (run.fontEmSize * 0.17).clamp(2.3, 3.4);
+                    self.dc.DrawGeometry(
+                        &translated,
+                        &self.outline_brush,
+                        stroke_width,
+                        &self.stroke_style,
+                    );
+                }
+                self.dc.FillGeometry(&translated, &self.fg_brush, None);
+            } else {
+                // Fallback for non-outline bitmap/color glyphs
+                ID2D1RenderTarget::DrawGlyphRun(
+                    &self.dc,
+                    D2D_POINT_2F {
+                        x: baselineoriginx,
+                        y: baselineoriginy,
+                    },
+                    run,
+                    &self.fg_brush,
+                    measuringmode,
+                );
+            }
+            Ok(())
+        }
+    }
+
+    fn DrawUnderline(
+        &self,
+        _clientdrawingcontext: *const c_void,
+        _baselineoriginx: f32,
+        _baselineoriginy: f32,
+        _underline: *const DWRITE_UNDERLINE,
+        _clientdrawingeffect: Option<&IUnknown>,
+    ) -> windows::core::Result<()> {
+        Ok(())
+    }
+
+    fn DrawStrikethrough(
+        &self,
+        _clientdrawingcontext: *const c_void,
+        _baselineoriginx: f32,
+        _baselineoriginy: f32,
+        _strikethrough: *const DWRITE_STRIKETHROUGH,
+        _clientdrawingeffect: Option<&IUnknown>,
+    ) -> windows::core::Result<()> {
+        Ok(())
+    }
+
+    fn DrawInlineObject(
+        &self,
+        _clientdrawingcontext: *const c_void,
+        _originx: f32,
+        _originy: f32,
+        _inlineobject: Option<&IDWriteInlineObject>,
+        _issideways: BOOL,
+        _isrighttoleft: BOOL,
+        _clientdrawingeffect: Option<&IUnknown>,
+    ) -> windows::core::Result<()> {
+        Ok(())
+    }
+}
+
+/// Crisp game-HUD text with true DirectWrite vector glyph outline (360-degree uniform round stroke)
+/// so white/colored text stays razor-sharp even on pure white snow/sand backgrounds.
 pub fn draw_text_outlined(
     dc: &ID2D1DeviceContext,
     gfx: &GraphicsEngine,
@@ -435,48 +605,33 @@ pub fn draw_text_outlined(
     let Ok(layout) = gfx.create_text_layout(text, fmt, w, h) else {
         return;
     };
-    if shadow_alpha > 0.01 {
-        if let Ok(halo) = brush(dc, rgba(0, 0, 0, (0.44 * shadow_alpha).clamp(0.0, 1.0))) {
-            let offsets = [(-0.65, 0.0), (0.65, 0.0), (0.0, -0.65), (0.0, 0.65)];
-            unsafe {
-                for (dx, dy) in offsets {
-                    dc.DrawTextLayout(
-                        D2D_POINT_2F {
-                            x: rect.left + dx,
-                            y: rect.top + dy,
-                        },
-                        &layout,
-                        &halo,
-                        D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                    );
-                }
-            }
-        }
-        if let Ok(drop_b) = brush(dc, rgba(0, 0, 0, (0.64 * shadow_alpha).clamp(0.0, 1.0))) {
-            unsafe {
-                dc.DrawTextLayout(
-                    D2D_POINT_2F {
-                        x: rect.left + 0.55,
-                        y: rect.top + 1.15,
-                    },
-                    &layout,
-                    &drop_b,
-                    D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                );
-            }
-        }
+    let Ok(fg_brush) = brush(dc, color) else {
+        return;
+    };
+    let outline_alpha = (0.92 * shadow_alpha).clamp(0.0, 1.0);
+    let Ok(outline_brush) = brush(dc, rgba(8, 10, 14, outline_alpha)) else {
+        return;
+    };
+
+    let renderer: IDWriteTextRenderer = OutlineTextRenderer {
+        d2d_factory: gfx.d2d_factory.clone(),
+        dc: dc.clone(),
+        outline_brush,
+        fg_brush,
+        stroke_style: gfx.round_stroke_style.clone(),
+        draw_outline: shadow_alpha > 0.01,
     }
-    if let Ok(fg) = brush(dc, color) {
-        unsafe {
-            dc.DrawTextLayout(
-                D2D_POINT_2F {
-                    x: rect.left,
-                    y: rect.top,
-                },
-                &layout,
-                &fg,
-                D2D1_DRAW_TEXT_OPTIONS_CLIP | D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT,
-            );
-        }
+    .into();
+
+    let clip = D2D_RECT_F {
+        left: rect.left - 2.5,
+        top: rect.top - 2.5,
+        right: rect.right + 2.5,
+        bottom: rect.bottom + 2.5,
+    };
+    unsafe {
+        dc.PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        let _ = layout.Draw(None, &renderer, rect.left, rect.top);
+        dc.PopAxisAlignedClip();
     }
 }

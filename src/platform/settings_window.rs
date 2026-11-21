@@ -1,9 +1,12 @@
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{HWND, RECT};
-use windows::Win32::Graphics::Direct2D::Common::{D2D1_GRADIENT_STOP, D2D_POINT_2F, D2D_RECT_F};
+use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
+use windows::Win32::Graphics::Direct2D::Common::{
+    D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_OPEN, D2D1_GRADIENT_STOP, D2D_POINT_2F, D2D_RECT_F,
+    D2D_SIZE_F,
+};
 use windows::Win32::Graphics::Direct2D::{
-    ID2D1DeviceContext, D2D1_EXTEND_MODE_CLAMP, D2D1_GAMMA_2_2,
-    D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES,
+    ID2D1DeviceContext, D2D1_ARC_SEGMENT, D2D1_ARC_SIZE_SMALL, D2D1_EXTEND_MODE_CLAMP,
+    D2D1_GAMMA_2_2, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_SWEEP_DIRECTION_CLOCKWISE,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_NORMAL,
@@ -12,8 +15,9 @@ use windows::Win32::Graphics::DirectWrite::{
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, GetSystemMetrics, RegisterClassW, SetForegroundWindow, ShowWindow,
-    CS_HREDRAW, CS_VREDRAW, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOW, WNDCLASSW, WNDPROC,
+    CreateWindowExW, GetSystemMetrics, LoadCursorW, LoadIconW, RegisterClassW, SendMessageW,
+    SetForegroundWindow, ShowWindow, CS_HREDRAW, CS_VREDRAW, ICON_BIG, ICON_SMALL, IDC_ARROW,
+    IDI_APPLICATION, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOW, WM_SETICON, WNDCLASSW, WNDPROC,
     WS_EX_NOREDIRECTIONBITMAP, WS_POPUP,
 };
 
@@ -108,10 +112,16 @@ impl SettingsWindow {
         unsafe {
             let hinst = windows::Win32::System::LibraryLoader::GetModuleHandleW(None)
                 .map_err(|e| format!("GetModuleHandleW failed: {e}"))?;
+            let hicon = LoadIconW(hinst, PCWSTR(1usize as *const u16))
+                .or_else(|_| LoadIconW(None, IDI_APPLICATION))
+                .unwrap_or_default();
+            let hcursor = LoadCursorW(None, IDC_ARROW).unwrap_or_default();
             let wc = WNDCLASSW {
                 style: CS_HREDRAW | CS_VREDRAW,
                 lpfnWndProc: wndproc,
                 hInstance: hinst.into(),
+                hIcon: hicon,
+                hCursor: hcursor,
                 lpszClassName: PCWSTR(class_w.as_ptr()),
                 ..Default::default()
             };
@@ -139,6 +149,21 @@ impl SettingsWindow {
                 None,
             )
             .map_err(|e| format!("CreateWindowExW Settings failed: {e}"))?;
+
+            if !hicon.0.is_null() {
+                let _ = SendMessageW(
+                    hwnd,
+                    WM_SETICON,
+                    WPARAM(ICON_BIG as usize),
+                    LPARAM(hicon.0 as isize),
+                );
+                let _ = SendMessageW(
+                    hwnd,
+                    WM_SETICON,
+                    WPARAM(ICON_SMALL as usize),
+                    LPARAM(hicon.0 as isize),
+                );
+            }
 
             let dpi = GetDpiForWindow(hwnd).max(96) as f32;
             let scale = dpi / 96.0;
@@ -275,39 +300,21 @@ fn render_settings_ui(
         right: w - 76.0,
         bottom: 42.0,
     };
-    // Small app badge icon
+    // Whisper soundwave emblem badge (matches assets/whisper.ico)
     let badge = D2D_RECT_F {
-        left: 16.0,
-        top: 12.0,
-        right: 34.0,
-        bottom: 30.0,
+        left: 14.0,
+        top: 10.0,
+        right: 36.0,
+        bottom: 32.0,
     };
-    fill_round_rect(dc, badge, 5.0, rgba(226, 232, 240, 0.94));
-    if let Ok(b_dark) = brush(dc, rgba(16, 20, 28, 0.95)) {
-        unsafe {
-            dc.DrawLine(
-                D2D_POINT_2F { x: 20.0, y: 18.0 },
-                D2D_POINT_2F { x: 30.0, y: 18.0 },
-                &b_dark,
-                1.8,
-                None,
-            );
-            dc.DrawLine(
-                D2D_POINT_2F { x: 20.0, y: 23.0 },
-                D2D_POINT_2F { x: 27.0, y: 23.0 },
-                &b_dark,
-                1.8,
-                None,
-            );
-        }
-    }
+    draw_whisper_badge(dc, gfx, badge);
     draw_text_simple(
         dc,
         gfx,
         "Whisper 设置",
         &title_fmt,
         D2D_RECT_F {
-            left: 42.0,
+            left: 44.0,
             top: 0.0,
             right: 240.0,
             bottom: 42.0,
@@ -857,7 +864,7 @@ fn render_settings_ui(
     let sound_label = view
         .sounds
         .iter()
-        .find(|s| s.key == view.settings.notification_sound)
+        .find(|s| s.key.eq_ignore_ascii_case(&view.settings.notification_sound))
         .map(|s| s.label.clone())
         .unwrap_or_else(|| {
             if view.settings.notification_sound.is_empty() {
@@ -984,7 +991,12 @@ fn render_settings_ui(
             let items: Vec<(String, bool)> = view
                 .sounds
                 .iter()
-                .map(|s| (s.label.clone(), s.key == view.settings.notification_sound))
+                .map(|s| {
+                    (
+                        s.label.clone(),
+                        s.key.eq_ignore_ascii_case(&view.settings.notification_sound),
+                    )
+                })
                 .collect();
             draw_dropdown_popup(
                 dc,
@@ -1001,6 +1013,92 @@ fn render_settings_ui(
     }
 
     hits
+}
+
+fn draw_whisper_badge(dc: &ID2D1DeviceContext, gfx: &GraphicsEngine, rect: D2D_RECT_F) {
+    let w = rect.right - rect.left;
+    let h = rect.bottom - rect.top;
+    // Deep sea slate base (#131824 -> #1D2638) + subtle #38BDF8 1px inner border
+    fill_round_rect(dc, rect, 5.5, rgba(24, 32, 48, 1.0));
+    stroke_round_rect(
+        dc,
+        D2D_RECT_F {
+            left: rect.left + 0.5,
+            top: rect.top + 0.5,
+            right: rect.right - 0.5,
+            bottom: rect.bottom - 0.5,
+        },
+        5.0,
+        rgba(56, 189, 248, 0.55),
+        1.0,
+    );
+
+    // Left rounded bubble sound-core (#F8FAFC)
+    let core_cx = rect.left + w * 0.36;
+    let core_cy = rect.top + h * 0.51;
+    if let Ok(core_b) = brush(dc, rgba(248, 250, 252, 0.98)) {
+        unsafe {
+            dc.FillEllipse(
+                &windows::Win32::Graphics::Direct2D::D2D1_ELLIPSE {
+                    point: D2D_POINT_2F {
+                        x: core_cx,
+                        y: core_cy,
+                    },
+                    radiusX: w * 0.145,
+                    radiusY: h * 0.145,
+                },
+                &core_b,
+            );
+        }
+    }
+
+    // Two right circular-arc sound waves (#38BDF8 and #60A5FA)
+    let arc_cx = rect.left + w * 0.43;
+    let arc_cy = rect.top + h * 0.50;
+    draw_badge_arc(dc, gfx, arc_cx, arc_cy, w * 0.22, 42.0, rgba(56, 189, 248, 1.0), 1.65);
+    draw_badge_arc(dc, gfx, arc_cx, arc_cy, w * 0.35, 48.0, rgba(96, 165, 250, 0.95), 1.65);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_badge_arc(
+    dc: &ID2D1DeviceContext,
+    gfx: &GraphicsEngine,
+    cx: f32,
+    cy: f32,
+    radius: f32,
+    half_angle_deg: f32,
+    color: windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F,
+    stroke_w: f32,
+) {
+    let rad = half_angle_deg.to_radians();
+    let start = D2D_POINT_2F {
+        x: cx + radius * rad.cos(),
+        y: cy - radius * rad.sin(),
+    };
+    let end = D2D_POINT_2F {
+        x: cx + radius * rad.cos(),
+        y: cy + radius * rad.sin(),
+    };
+    unsafe {
+        if let (Ok(geom), Ok(b)) = (gfx.d2d_factory.CreatePathGeometry(), brush(dc, color)) {
+            if let Ok(sink) = geom.Open() {
+                sink.BeginFigure(start, D2D1_FIGURE_BEGIN_HOLLOW);
+                sink.AddArc(&D2D1_ARC_SEGMENT {
+                    point: end,
+                    size: D2D_SIZE_F {
+                        width: radius,
+                        height: radius,
+                    },
+                    rotationAngle: 0.0,
+                    sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
+                    arcSize: D2D1_ARC_SIZE_SMALL,
+                });
+                sink.EndFigure(D2D1_FIGURE_END_OPEN);
+                let _ = sink.Close();
+                dc.DrawGeometry(&geom, &b, stroke_w, &gfx.round_stroke_style);
+            }
+        }
+    }
 }
 
 fn draw_preview_backdrop(dc: &ID2D1DeviceContext, rect: D2D_RECT_F, night: bool) {
