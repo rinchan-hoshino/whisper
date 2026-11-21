@@ -28,6 +28,8 @@ pub enum UpdateCheckResult {
     UpToDate(String),
     UpdatedAndRestarting(String, PathBuf, Option<PathBuf>),
     Error(String),
+    SilentNoUpdate,
+    SilentReady(String, Vec<u8>),
 }
 
 pub fn cleanup_old_binaries() {
@@ -263,42 +265,52 @@ fn manifest_url() -> (String, bool) {
     (DEFAULT_MANIFEST_URL.to_string(), false)
 }
 
-pub fn check_and_apply_update() -> UpdateCheckResult {
+fn fetch_and_verify_update() -> Result<Option<(String, Vec<u8>)>, String> {
     let (url, allow_loopback) = manifest_url();
     let headers = vec![("User-Agent".to_string(), format!("Whisper/{APP_VERSION}"))];
 
     let resp = match http_request("GET", &url, &headers, None, 8000) {
         Ok(r) if r.status == 200 => r,
-        Ok(r) => return UpdateCheckResult::Error(format!("检查更新失败 (HTTP {})", r.status)),
-        Err(e) => return UpdateCheckResult::Error(format!("检查更新失败: {e}")),
+        Ok(r) => return Err(format!("检查更新失败 (HTTP {})", r.status)),
+        Err(e) => return Err(format!("检查更新失败: {e}")),
     };
 
-    let manifest: UpdateManifest = match parse_manifest(&resp.body, allow_loopback) {
-        Ok(m) => m,
-        Err(e) => return UpdateCheckResult::Error(format!("更新清单无效: {e}")),
-    };
+    let manifest: UpdateManifest = parse_manifest(&resp.body, allow_loopback)
+        .map_err(|e| format!("更新清单无效: {e}"))?;
 
-    match is_newer_version(&manifest.version, APP_VERSION) {
-        Ok(true) => {}
-        Ok(false) => return UpdateCheckResult::UpToDate(APP_VERSION.to_string()),
-        Err(e) => return UpdateCheckResult::Error(e),
+    if !is_newer_version(&manifest.version, APP_VERSION)? {
+        return Ok(None);
     }
 
     let bin_resp = match http_request("GET", &manifest.url, &headers, None, 30_000) {
         Ok(r) if r.status == 200 => r,
-        Ok(r) => return UpdateCheckResult::Error(format!("下载更新失败 (HTTP {})", r.status)),
-        Err(e) => return UpdateCheckResult::Error(format!("下载更新失败: {e}")),
+        Ok(r) => return Err(format!("下载更新失败 (HTTP {})", r.status)),
+        Err(e) => return Err(format!("下载更新失败: {e}")),
     };
 
-    if let Err(e) = verify_bytes(&bin_resp.body, &manifest.sha256, manifest.size) {
-        return UpdateCheckResult::Error(format!("更新包校验失败: {e}"));
-    }
+    verify_bytes(&bin_resp.body, &manifest.sha256, manifest.size)
+        .map_err(|e| format!("更新包校验失败: {e}"))?;
 
-    match atomic_self_replace(&bin_resp.body) {
-        Ok((exe_path, old_path)) => {
-            UpdateCheckResult::UpdatedAndRestarting(manifest.version, exe_path, Some(old_path))
-        }
-        Err(e) => UpdateCheckResult::Error(format!("替换程序失败: {e}")),
+    Ok(Some((manifest.version, bin_resp.body)))
+}
+
+pub fn check_and_apply_update() -> UpdateCheckResult {
+    match fetch_and_verify_update() {
+        Ok(None) => UpdateCheckResult::UpToDate(APP_VERSION.to_string()),
+        Ok(Some((version, bytes))) => match atomic_self_replace(&bytes) {
+            Ok((exe_path, old_path)) => {
+                UpdateCheckResult::UpdatedAndRestarting(version, exe_path, Some(old_path))
+            }
+            Err(e) => UpdateCheckResult::Error(format!("替换程序失败: {e}")),
+        },
+        Err(e) => UpdateCheckResult::Error(e),
+    }
+}
+
+pub fn check_silent_update() -> UpdateCheckResult {
+    match fetch_and_verify_update() {
+        Ok(Some((version, bytes))) => UpdateCheckResult::SilentReady(version, bytes),
+        Ok(None) | Err(_) => UpdateCheckResult::SilentNoUpdate,
     }
 }
 
@@ -308,7 +320,7 @@ pub fn check_and_apply_update() -> UpdateCheckResult {
 /// 3. Rename `<target>.new` -> `<target>`
 /// 4. If migrated from a legacy name, update autostart registry & `.lnk` shortcuts
 /// 5. Return `(target, old_path)` so `main()` spawns the new binary with `--cleanup-updater`
-fn atomic_self_replace(new_bytes: &[u8]) -> Result<(PathBuf, PathBuf), String> {
+pub fn atomic_self_replace(new_bytes: &[u8]) -> Result<(PathBuf, PathBuf), String> {
     let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
     let (target_exe, is_legacy) = target_whisper_path(&exe);
     let new_path = PathBuf::from(format!("{}.new", target_exe.display()));

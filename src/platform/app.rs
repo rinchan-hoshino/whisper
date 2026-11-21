@@ -25,6 +25,9 @@ use crate::core::lifecycle::{ConnectionLifecycle, LifecycleAction};
 use crate::core::protocol::{AreaInfo, TextChannel};
 use crate::core::settings::{AppSettings, DockCorner};
 use crate::core::timeline::Timeline;
+use crate::core::updater_core::{
+    auto_update_interval_ms, initial_auto_update_delay_ms, SilentUpdateCoordinator, UpdateIdleState,
+};
 use crate::platform::autostart::{is_autostart_enabled, set_autostart_enabled};
 use crate::platform::d2d::GraphicsEngine;
 use crate::platform::dpapi::{load_or_migrate_settings, save_settings};
@@ -43,7 +46,9 @@ use crate::platform::tray::{
     TrayIcon, CMD_TRAY_CHECK_UPDATE, CMD_TRAY_QUIT, CMD_TRAY_SETTINGS, CMD_TRAY_TOGGLE_HUD,
     WM_APP_TRAY,
 };
-use crate::platform::updater::{check_and_apply_update, UpdateCheckResult};
+use crate::platform::updater::{
+    atomic_self_replace, check_and_apply_update, check_silent_update, UpdateCheckResult,
+};
 
 const HOTKEY_ACTIVATE_ID: i32 = 0xB001;
 const HOTKEY_VISIBILITY_ID: i32 = 0xB002;
@@ -52,6 +57,8 @@ const TIMER_FADE: usize = 1;
 const TIMER_CARET: usize = 2;
 const TIMER_TOAST: usize = 3;
 const TIMER_SESSION_POLL: usize = 4;
+const TIMER_AUTO_UPDATE_INITIAL: usize = 5;
+const TIMER_AUTO_UPDATE: usize = 6;
 
 const WM_APP_UPDATE_RESULT: u32 = WM_APP + 104;
 
@@ -112,6 +119,8 @@ struct AppState {
     // On-demand timer flags (0% idle redraw)
     fade_timer_on: bool,
     caret_timer_on: bool,
+    silent_updater: SilentUpdateCoordinator,
+    auto_update_interval_ms: u32,
     relaunch_exe: Option<(PathBuf, Option<PathBuf>)>,
 }
 
@@ -148,6 +157,9 @@ pub fn run_app() -> Result<Option<(PathBuf, Option<PathBuf>)>, String> {
     let (gateway, gateway_rx) = GatewayHandle::new(hud.hwnd);
     let (update_tx, update_rx) = mpsc::channel();
     let sounds = enumerate_sounds();
+    let auto_interval_ms =
+        auto_update_interval_ms(std::env::var("WHISPER_AUTO_UPDATE_INTERVAL_MS").ok().as_deref());
+    let initial_auto_delay_ms = initial_auto_update_delay_ms(auto_interval_ms);
 
     let mut state = AppState {
         gfx,
@@ -189,6 +201,8 @@ pub fn run_app() -> Result<Option<(PathBuf, Option<PathBuf>)>, String> {
         update_status: String::new(),
         fade_timer_on: false,
         caret_timer_on: false,
+        silent_updater: SilentUpdateCoordinator::new(),
+        auto_update_interval_ms: auto_interval_ms,
         relaunch_exe: None,
     };
 
@@ -196,6 +210,12 @@ pub fn run_app() -> Result<Option<(PathBuf, Option<PathBuf>)>, String> {
     state.gateway.check_session();
     unsafe {
         let _ = SetTimer(state.hud.hwnd, TIMER_SESSION_POLL, 2500, None);
+        let _ = SetTimer(
+            state.hud.hwnd,
+            TIMER_AUTO_UPDATE_INITIAL,
+            initial_auto_delay_ms,
+            None,
+        );
     }
     if state.settings.area_id.is_empty() || state.settings.channel_id.is_empty() {
         // First run or no channel chosen yet -> open Settings window
@@ -408,6 +428,7 @@ impl AppState {
         if self.hud_visible {
             self.render_hud();
         }
+        self.try_apply_pending_silent_update();
     }
 
     fn enter_active_mode(&mut self) {
@@ -443,6 +464,8 @@ impl AppState {
         }
         if was_adjust {
             self.open_settings();
+        } else {
+            self.try_apply_pending_silent_update();
         }
     }
 
@@ -727,6 +750,47 @@ impl AppState {
         });
     }
 
+    fn trigger_silent_update_check(&mut self) {
+        if self.relaunch_exe.is_some() || !self.silent_updater.should_start_check() {
+            return;
+        }
+        self.silent_updater.mark_check_started();
+        let tx = self.update_tx.clone();
+        let hwnd = self.hud.hwnd.0 as usize;
+        thread::spawn(move || {
+            let res = check_silent_update();
+            let _ = tx.send(res);
+            unsafe {
+                let _ = PostMessageW(
+                    HWND(hwnd as *mut _),
+                    WM_APP_UPDATE_RESULT,
+                    WPARAM(0),
+                    LPARAM(0),
+                );
+            }
+        });
+    }
+
+    fn try_apply_pending_silent_update(&mut self) {
+        if self.relaunch_exe.is_some() {
+            return;
+        }
+        let idle = UpdateIdleState {
+            hud_active: self.hud_active,
+            adjust_mode: self.adjust_mode,
+            settings_visible: self.settings_win.visible,
+            has_draft: !self.draft.is_empty(),
+        };
+        if let Some(pending) = self.silent_updater.take_if_idle(idle) {
+            if let Ok((exe_path, old_path)) = atomic_self_replace(&pending.bytes) {
+                self.relaunch_exe = Some((exe_path, Some(old_path)));
+                unsafe {
+                    PostQuitMessage(0);
+                }
+            }
+        }
+    }
+
     fn handle_update_results(&mut self) {
         while let Ok(res) = self.update_rx.try_recv() {
             match res {
@@ -745,6 +809,13 @@ impl AppState {
                 UpdateCheckResult::Error(e) => {
                     self.update_status = e;
                     self.render_settings();
+                }
+                UpdateCheckResult::SilentNoUpdate => {
+                    self.silent_updater.on_check_finished_no_update();
+                }
+                UpdateCheckResult::SilentReady(version, bytes) => {
+                    self.silent_updater.on_check_finished_ready(version, bytes);
+                    self.try_apply_pending_silent_update();
                 }
             }
         }
@@ -1339,6 +1410,20 @@ unsafe extern "system" fn hud_wndproc(
                 }
                 TIMER_SESSION_POLL => {
                     app.gateway.check_session();
+                    app.try_apply_pending_silent_update();
+                }
+                TIMER_AUTO_UPDATE_INITIAL => {
+                    let _ = KillTimer(app.hud.hwnd, TIMER_AUTO_UPDATE_INITIAL);
+                    let _ = SetTimer(
+                        app.hud.hwnd,
+                        TIMER_AUTO_UPDATE,
+                        app.auto_update_interval_ms,
+                        None,
+                    );
+                    app.trigger_silent_update_check();
+                }
+                TIMER_AUTO_UPDATE => {
+                    app.trigger_silent_update_check();
                 }
                 _ => {}
             });
